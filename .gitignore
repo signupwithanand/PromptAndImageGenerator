@@ -1,0 +1,23 @@
+# Virtual environment
+imagegen/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Large files and directories
+*.lib
+*.dll
+
+# Specific large files
+**/mkl_avx512.1.dll
+**/mkl_core.1.dll
+**/mkl_intel_thread.1.dll
+**/mkl_pgi_thread.1.dll
+**/torch_cpu.dll
+**/dnnl.lib

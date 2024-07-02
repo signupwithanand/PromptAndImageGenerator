@@ -1,0 +1,9 @@
+openai
+pillow
+requests
+torch
+torchvision
+numpy
+clip
+python-dotenv
+anthropic
