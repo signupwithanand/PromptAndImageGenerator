@@ -7,3 +7,6 @@ numpy
 clip
 python-dotenv
 anthropic
+streamlit
+streamlit_lottie
+PySimpleGUI
