@@ -1,19 +1,16 @@
 import os
 import io
 from io import BytesIO
-import base64
 from typing import List, Dict
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFont
 import requests
 from openai import OpenAI
 import anthropic
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
 import json
-import re
-import threading
 import time
 from dotenv import load_dotenv
+import PySimpleGUI as sg
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -23,34 +20,38 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 class Character:
-    def __init__(self, name: str, description: str):
+    def __init__(self, name: str, brief_description: str):
         self.name = name
-        self.description = description
+        self.brief_description = brief_description
+        self.detailed_description = ""
         self.reference_image = None
-        self.appearance_details = ""
 
 class Poem:
     def __init__(self, text: str):
         self.text = text
         self.stanzas = []
         self.characters: Dict[str, Character] = {}
+        self.theme = ""
         self.context = ""
         self.time_period = ""
-        self.cultural_setting = ""
+        self.location = ""
+        self.style = ""
 
 class ContextAnalyzer:
-    def analyze_context(self, poem_text: str) -> Dict[str, str]:
-        print("Analyzing poem context...")
+    def analyze_context(self, poem_text: str, window) -> Dict[str, str]:
+        update_output(window, "Analyzing poem context...")
         context_prompt = f"""Analyze the following poem and provide:
         1. The main theme or subject of the poem
-        2. The cultural or mythological context (if any)
-        3. The setting or time period (if applicable)
+        2. The cultural, historical, or social context (be as specific as possible)
+        3. The setting or time period (if applicable, otherwise state 'Not specified')
         4. Any significant symbols or motifs
+        5. The geographical location or region associated with the poem's content (if applicable)
+        6. The style or type of poem (e.g., narrative, lyric, free verse, etc.)
 
         Poem:
         {poem_text}
 
-        Provide your analysis as a clear, structured response with labels for each aspect."""
+        Provide your analysis as a Python dictionary with keys 'theme', 'context', 'time_period', 'symbols', 'location', and 'style'. Be as detailed and specific as possible, but use 'Not specified' if any aspect is not clear from the poem."""
         
         response = claude_client.messages.create(
             model="claude-3-sonnet-20240229",
@@ -58,39 +59,60 @@ class ContextAnalyzer:
             messages=[{"role": "user", "content": context_prompt}]
         )
         
-        analysis_text = response.content[0].text.strip()
-        
-        # Parse the response manually
-        context = {
-            "theme": "Not specified",
-            "cultural_context": "Not specified",
-            "time_period": "Not specified",
-            "symbols": "None identified"
-        }
-        
-        for line in analysis_text.split('\n'):
-            line = line.strip()
-            if line.startswith("Theme:"):
-                context["theme"] = line.split("Theme:", 1)[1].strip()
-            elif line.startswith("Cultural context:"):
-                context["cultural_context"] = line.split("Cultural context:", 1)[1].strip()
-            elif line.startswith("Setting/Time period:"):
-                context["time_period"] = line.split("Setting/Time period:", 1)[1].strip()
-            elif line.startswith("Symbols/Motifs:"):
-                context["symbols"] = line.split("Symbols/Motifs:", 1)[1].strip()
-        
-        print(f"Context analysis:\n{json.dumps(context, indent=2)}")
-        return context
+        try:
+            context_dict = json.loads(response.content[0].text)
+        except json.JSONDecodeError:
+            content = response.content[0].text
+            context_dict = {}
+            for line in content.split('\n'):
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    context_dict[key.strip().strip("'")] = value.strip().strip("'")
+
+        required_keys = ['theme', 'context', 'time_period', 'symbols', 'location', 'style']
+        for key in required_keys:
+            if key not in context_dict:
+                context_dict[key] = "Not specified"
+
+        update_output(window, f"Context analysis complete: {json.dumps(context_dict, indent=2)}")
+        return context_dict
+
 
 class CharacterInitializer:
-    def initialize_character(self, name: str, description: str) -> Character:
-        character = Character(name, description)
-        prompt = f"Create a detailed, high-quality portrait of {description}. Ensure the face is clear and detailed, with natural-looking eyes. The image should be suitable as a reference for consistent character depiction across multiple scenes. Avoid any anachronistic elements."
+    def generate_detailed_description(self, name: str, brief_description: str, poem_context: str, window) -> str:
+        update_output(window, f"Generating detailed description for character: {name}")
+        prompt = f"""Generate a highly detailed physical description for the character or element "{name}" based on the brief description: "{brief_description}". Consider the poem's context: {poem_context}
+
+        Include specific details about:
+        1. Facial features (if applicable: shape of face, eyes, nose, mouth, ears, etc.)
+        2. Skin tone and texture (if applicable: including any wrinkles, blemishes, or distinguishing marks)
+        3. Hair color, style, and texture (if applicable)
+        4. Body type and posture (if applicable)
+        5. Clothing and accessories (be specific about styles, colors, and materials)
+        6. Any unique or distinguishing characteristics
+        7. Approximate age and how it shows in their appearance (if applicable)
+        8. Typical facial expressions or emotions (if applicable)
+        9. If this is not a person, describe its physical appearance, colors, textures, and any other relevant visual details
+
+        Provide a comprehensive description that would allow an artist to create a consistent representation of this character or element across multiple illustrations."""
+
+        response = claude_client.messages.create(
+            model="claude-3-sonnet-20240229",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        return response.content[0].text.strip()
+
+    def initialize_character(self, name: str, brief_description: str, poem_context: str, window) -> Character:
+        character = Character(name, brief_description)
+        character.detailed_description = self.generate_detailed_description(name, brief_description, poem_context, window)
         
         try:
+            update_output(window, f"Generating image for character: {name}")
             response = openai_client.images.generate(
                 model="dall-e-3",
-                prompt=prompt,
+                prompt=f"Create a detailed portrait of {character.detailed_description}. Ensure the image captures all the specific physical characteristics described.",
                 n=1,
                 size="1024x1024",
                 quality="hd",
@@ -101,40 +123,36 @@ class CharacterInitializer:
             image_response = requests.get(image_url)
             character.reference_image = Image.open(BytesIO(image_response.content))
             
-            # Generate detailed appearance description
-            appearance_prompt = f"Describe the appearance of {name} in great detail, including facial features, body type, clothing, and any distinguishing characteristics. This description will be used to maintain consistency across multiple images."
-            appearance_response = claude_client.messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=500,
-                messages=[{"role": "user", "content": appearance_prompt}]
-            )
-            character.appearance_details = appearance_response.content[0].text.strip()
-            
         except Exception as e:
-            print(f"Error initializing character {name}: {str(e)}")
+            update_output(window, f"Error generating image for character {name}: {str(e)}")
             character.reference_image = None
         
         return character
 
-
-
-
 class PoemAnalyzer:
-    def analyze_poem(self, poem_text: str) -> Poem:
+    def analyze_poem(self, poem_text: str, window) -> Poem:
         poem = Poem(poem_text)
         poem.stanzas = self.identify_stanzas(poem_text)
-        context_analysis = self.analyze_poem_context(poem_text)
+        context_analysis = self.analyze_poem_context(poem_text, window)
         poem.context = context_analysis.get('context', 'Unknown context')
         poem.time_period = context_analysis.get('time_period', 'Unknown time period')
         poem.cultural_setting = context_analysis.get('cultural_setting', 'Unknown cultural setting')
         return poem
 
-    def identify_characters(self, poem_text: str) -> List[Dict[str, str]]:
+    def identify_characters(self, poem_text: str, window) -> List[Dict[str, str]]:
+        update_output(window, "Identifying characters in the poem...")
         response = claude_client.messages.create(
             model="claude-3-sonnet-20240229",
             max_tokens=1000,
             messages=[
-                {"role": "user", "content": f"Identify key characters in this poem. For each character, provide a name and a detailed physical description. Format your response as a Python list of dictionaries, where each dictionary has 'name' and 'description' keys. Only include characters that are explicitly mentioned or clearly implied in the poem. For example: [{{\"name\": \"Character Name\", \"description\": \"Character Description\"}}, ...]\n\n{poem_text}"}
+                {"role": "user", "content": f"""Identify key characters or subjects in this poem. For each, provide a name or identifier and a brief description. Format your response as a Python list of dictionaries, where each dictionary has 'name' and 'brief_description' keys. Only include characters or entities that are explicitly mentioned or clearly implied in the poem. If the poem doesn't have specific characters, identify key subjects or elements. Example format:
+                [
+                    {{"name": "The Soldier", "brief_description": "A young man in military uniform"}},
+                    {{"name": "The City", "brief_description": "A bustling metropolis"}}
+                ]
+
+                Poem:
+                {poem_text}"""}
             ]
         )
         
@@ -145,30 +163,31 @@ class PoemAnalyzer:
             if isinstance(characters, list):
                 return characters
         except json.JSONDecodeError:
-            print("Failed to parse the character list as JSON.")
-        
-        # If parsing fails, try to manually extract character information
+            update_output(window, "Failed to parse the character list as JSON. Attempting manual extraction.")
+            
         characters = []
         lines = content.split('\n')
         for line in lines:
             if ':' in line:
                 parts = line.split(':', 1)
                 if len(parts) == 2:
-                    name = parts[0].strip().strip('"')
-                    description = parts[1].strip().strip('"')
-                    characters.append({"name": name, "description": description})
+                    name = parts[0].strip().strip('"{}')
+                    brief_description = parts[1].strip().strip('"{}')
+                    characters.append({"name": name, "brief_description": brief_description})
         
         if not characters:
-            print("No specific characters identified in the poem.")
+            update_output(window, "No specific characters or key elements identified in the poem.")
+            characters = [{"name": "General Scene", "brief_description": "A representation of the overall poem's atmosphere"}]
         
         return characters
+
 
     def identify_stanzas(self, poem_text: str) -> List[str]:
         return [stanza.strip() for stanza in poem_text.split('\n\n') if stanza.strip()]
 
-
-    def analyze_poem_context(self, poem_text: str) -> Dict[str, str]:
+    def analyze_poem_context(self, poem_text: str, window) -> Dict[str, str]:
         try:
+            update_output(window, "Analyzing poem context...")
             response = claude_client.messages.create(
                 model="claude-3-sonnet-20240229",
                 max_tokens=1000,
@@ -177,11 +196,9 @@ class PoemAnalyzer:
                 ]
             )
             
-            # Try to parse the response as JSON
             try:
                 context_dict = json.loads(response.content[0].text)
             except json.JSONDecodeError:
-                # If JSON parsing fails, try to extract the dictionary manually
                 content = response.content[0].text
                 context_dict = {}
                 for line in content.split('\n'):
@@ -189,7 +206,6 @@ class PoemAnalyzer:
                         key, value = line.split(':', 1)
                         context_dict[key.strip().strip("'")] = value.strip().strip("'")
 
-            # Validate and fill missing keys
             required_keys = ['context', 'time_period', 'cultural_setting']
             for key in required_keys:
                 if key not in context_dict:
@@ -197,53 +213,51 @@ class PoemAnalyzer:
 
             return context_dict
         except Exception as e:
-            print(f"An error occurred during poem context analysis: {str(e)}")
+            update_output(window, f"An error occurred during poem context analysis: {str(e)}")
             return {
                 'context': 'Unknown context',
                 'time_period': 'Unknown time period',
                 'cultural_setting': 'Unknown cultural setting'
             }
 
-
 class PromptGenerator:
     def __init__(self):
         self.feedback_history = []
-
-    def generate_prompt(self, stanza: str, poem: Poem, characters: Dict[str, Character]) -> str:
-        print("Analyzing stanza and generating prompt...")
+    
+    def generate_prompt(self, stanza: str, poem: Poem, characters: Dict[str, Character], window) -> str:
+        update_output(window, "Analyzing stanza and generating prompt...")
         start_time = time.time()
 
         stanza_characters = self.identify_stanza_characters(stanza, characters)
-        character_descriptions = "\n".join([f"{name}: {char.appearance_details}" for name, char in stanza_characters.items()])
+        character_descriptions = "\n".join([f"{name}: {char.detailed_description}" for name, char in stanza_characters.items()])
         
-        context_prompt = f"""Generate a vivid, creative description for an illustration based on the following stanza and context:
+        context_prompt = f"""Generate a vivid, accurate description for an illustration based on the following stanza and context:
 
         Stanza: "{stanza}"
 
-        Overall poem context: {poem.context}
+        Overall poem theme: {poem.theme}
+        Context: {poem.context}
         Time period: {poem.time_period}
-        Cultural setting: {poem.cultural_setting}
+        Location: {poem.location}
+        Style: {poem.style}
 
-        Characters present in this stanza (only include if explicitly mentioned):
+        Characters in this stanza (use these exact descriptions for consistency):
         {character_descriptions}
 
         Previous feedback: {' '.join(self.feedback_history)}
 
         Instructions:
-        1. Focus on creating a scene that accurately represents the mythological or thematic context.
-        2. Emphasize cultural authenticity in all aspects (clothing, architecture, objects, etc.).
-        3. Create a detailed, realistic scene rather than a cartoonish representation.
-        4. Use rich, vibrant colors associated with the cultural context.
-        5. Include traditional symbols and elements relevant to the story or theme.
-        6. Ensure all individuals have features and appearances consistent with the cultural and historical context.
-        7. Only include characters explicitly mentioned or clearly implied in the stanza.
-        8. For generic scenes, focus on the overall atmosphere rather than specific individuals.
-        9. Maintain consistency with previously described character appearances.
-        10. Incorporate any relevant previous feedback to improve the image.
+        1. Create a scene that EXACTLY matches the content of the given stanza, considering the poem's context and style.
+        2. If specific characters are mentioned, use their detailed descriptions to ensure consistency across illustrations.
+        3. If a specific time period is mentioned, ensure all elements (clothing, architecture, objects) are historically accurate.
+        4. If specific locations are mentioned, accurately represent their geographical and cultural characteristics.
+        5. Pay close attention to the mood, atmosphere, and any symbolic elements mentioned in the poem.
+        6. Only include characters, objects, or elements explicitly mentioned or clearly implied in the stanza.
+        7. If the poem is abstract or doesn't describe a specific scene, focus on capturing the emotion or concept through color, composition, and symbolic imagery.
 
-        Provide a concise description (75-100 words) for an illustration that vividly and creatively captures the stanza's essence, suitable for an AI image generation model."""
+        Provide a detailed description (200-250 words) for an illustration that vividly and accurately captures the stanza's specific content, atmosphere, and underlying meaning, suitable for an AI image generation model. Ensure that any characters described are portrayed exactly as in their detailed descriptions."""
         
-        print("Sending prompt to Claude AI for processing...")
+        update_output(window, "Sending prompt to Claude AI for processing...")
         response = claude_client.messages.create(
             model="claude-3-sonnet-20240229",
             max_tokens=1000,
@@ -254,51 +268,57 @@ class PromptGenerator:
         
         prompt = response.content[0].text.strip()
         
-        # Generate dynamic negative prompts based on the poem's context
         negative_prompt = self.generate_negative_prompt(poem)
         
         end_time = time.time()
-        print(f"Prompt generation completed in {end_time - start_time:.2f} seconds.")
+        update_output(window, f"Prompt generation completed in {end_time - start_time:.2f} seconds.")
         
         return f"{prompt}\nNegative prompt: {negative_prompt}"
 
-    def identify_stanza_characters(self, stanza: str, all_characters: Dict[str, Character]) -> Dict[str, Character]:
-        print("Identifying characters in the stanza...")
-        stanza_characters = {}
-        for name, character in all_characters.items():
-            if name.lower() in stanza.lower() or any(word.lower() in stanza.lower() for word in name.split()):
-                stanza_characters[name] = character
-        print(f"Characters identified: {', '.join(stanza_characters.keys())}")
-        return stanza_characters
-
     def generate_negative_prompt(self, poem: Poem) -> str:
         negative_elements = [
-            "low quality", "blurry", "distorted faces", "anachronistic elements",
+            "low quality", "blurry", "distorted", "anachronistic elements",
             "historically inaccurate details", "culturally inappropriate elements",
             "out-of-context objects or settings"
         ]
         
-        if poem.time_period != "unspecified":
+        if poem.time_period != "Not specified":
             negative_elements.append(f"elements not fitting {poem.time_period} time period")
         
-        if poem.cultural_setting != "unspecified":
-            negative_elements.append(f"elements inconsistent with {poem.cultural_setting} culture")
+        if poem.context != "Not specified":
+            negative_elements.append(f"elements inconsistent with {poem.context}")
         
         return ", ".join(negative_elements)
 
+
+    def identify_stanza_characters(self, stanza: str, all_characters: Dict[str, Character]) -> Dict[str, Character]:
+        stanza_characters = {}
+        for name, character in all_characters.items():
+            if name.lower() in stanza.lower() or any(word.lower() in stanza.lower() for word in name.split()):
+                stanza_characters[name] = character
+        return stanza_characters
+
+
     def add_feedback(self, feedback: str):
         self.feedback_history.append(feedback)
-        if len(self.feedback_history) > 5:  # Keep only the last 5 feedback items
+        if len(self.feedback_history) > 5:
             self.feedback_history.pop(0)
-        print(f"Feedback added: {feedback}")
+
 
 class ImageGenerator:
-    def generate_image(self, prompt: str, stanza: str, output_path: str, version: int = 1) -> str:
+    def generate_image(self, prompt: str, stanza: str, output_path: str, window, version: int = 1) -> str:
         try:
-            print("Generating illustration...")
+            update_output(window, "Generating illustration...")
+            full_prompt = f"""
+            Create an image based on the following description:
+
+            {prompt}
+
+            Ensure the image accurately reflects the described scene, mood, and any specified cultural or historical context.
+            """
             response = openai_client.images.generate(
                 model="dall-e-3",
-                prompt=prompt,
+                prompt=full_prompt,
                 n=1,
                 size="1024x1024",
                 quality="hd",
@@ -309,16 +329,15 @@ class ImageGenerator:
             image_response = requests.get(image_url)
             image = Image.open(BytesIO(image_response.content))
             
-            # Imprint stanza on the image
             self.imprint_stanza(image, stanza)
             
             image_path = f"{output_path}_v{version}.png"
             image.save(image_path, format='PNG')
             
-            print(f"Image saved to: {image_path}")
+            update_output(window, f"Image saved to: {image_path}")
             return image_path
         except Exception as e:
-            print(f"Failed to generate image. Error: {str(e)}")
+            update_output(window, f"Failed to generate image. Error: {str(e)}")
             return None
 
     def imprint_stanza(self, image: Image, stanza: str):
@@ -327,7 +346,6 @@ class ImageGenerator:
             font_size = 20
             font = ImageFont.truetype("arial.ttf", font_size)
             
-            # Determine text placement (top or bottom)
             text_color = (255, 255, 255)  # White text
             shadow_color = (0, 0, 0)  # Black shadow
             padding = 10
@@ -367,187 +385,134 @@ class ImageGenerator:
                 lines.append(' '.join(line))
         return lines
 
-
-class ImprovedUserInterface:
-    def __init__(self, master):
-        self.master = master
-        self.master.title("Poetry Image Generator")
-        self.master.geometry("1200x800")
-
-        # Create left and right frames
-        self.left_frame = ttk.Frame(master, padding="10")
-        self.right_frame = ttk.Frame(master, padding="10")
-        self.left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
-        # Left frame components
-        self.poem_text = scrolledtext.ScrolledText(self.left_frame, wrap=tk.WORD, width=40, height=20)
-        self.poem_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
-        self.status_text = scrolledtext.ScrolledText(self.left_frame, wrap=tk.WORD, width=40, height=20, state='disabled')
-        self.status_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-
-        self.generate_button = ttk.Button(self.left_frame, text="Generate Images", command=self.process_poem)
-        self.generate_button.pack(pady=10)
-
-        # Right frame components (initially hidden)
-        self.image_label = ttk.Label(self.right_frame)
-        self.feedback_text = scrolledtext.ScrolledText(self.right_frame, wrap=tk.WORD, width=40, height=5)
-        self.accept_button = ttk.Button(self.right_frame, text="Accept", command=self.accept)
-        self.regenerate_button = ttk.Button(self.right_frame, text="Regenerate", command=self.regenerate)
-        self.exit_button = ttk.Button(self.right_frame, text="Exit", command=self.exit_program)
-
-        self.generator = PoetryImageGenerator(self)
-        self.feedback_received = threading.Event()
-        self.stop_event = threading.Event()
-
-    def update_status(self, message):
-        self.status_text.config(state='normal')
-        self.status_text.insert(tk.END, message + "\n")
-        self.status_text.see(tk.END)
-        self.status_text.config(state='disabled')
-        self.master.update_idletasks()
-
-    def show_image_and_controls(self, image_path):
-        image = Image.open(image_path)
-        image.thumbnail((400, 400))  # Resize image if too large
-        photo = ImageTk.PhotoImage(image)
-        self.image_label.config(image=photo)
-        self.image_label.image = photo  # Keep a reference
-        self.image_label.pack(pady=10)
-
-        self.feedback_text.pack(padx=10, pady=10, fill=tk.X)
-        self.accept_button.pack(side=tk.LEFT, padx=5)
-        self.regenerate_button.pack(side=tk.LEFT, padx=5)
-        self.exit_button.pack(side=tk.LEFT, padx=5)
-
-    def hide_image_and_controls(self):
-        self.image_label.pack_forget()
-        self.feedback_text.pack_forget()
-        self.accept_button.pack_forget()
-        self.regenerate_button.pack_forget()
-        self.exit_button.pack_forget()
-
-    def accept(self):
-        self.result = "accept"
-        self.feedback_received.set()
-
-    def regenerate(self):
-        self.result = "regenerate"
-        self.feedback_received.set()
-
-    def exit_program(self):
-        self.result = "exit"
-        self.feedback_received.set()
-        self.stop_event.set()
-        self.master.quit()
-
-    def process_poem(self):
-        poem_text = self.poem_text.get("1.0", tk.END).strip()
-        if not poem_text:
-            messagebox.showwarning("Warning", "Please enter the poem before proceeding.")
-            return
-
-        output_folder = filedialog.askdirectory(title="Select Output Folder")
-        if not output_folder:
-            messagebox.showwarning("Warning", "No folder selected. Operation cancelled.")
-            return
-
-        self.update_status("Starting poem processing...")
-        threading.Thread(target=self.generator.process_poem, args=(poem_text, output_folder)).start()
-
-    def wait_for_feedback(self, image_path):
-        self.master.after(0, lambda: self.show_image_and_controls(image_path))
-        self.update_status("Waiting for user feedback. Please review the image and provide your input.")
-        self.feedback_received.wait()
-        feedback = self.feedback_text.get("1.0", tk.END).strip()
-        self.update_status(f"Feedback received: {self.result}")
-        self.hide_image_and_controls()
-        self.feedback_received.clear()
-        return self.result, feedback
-
 class PoetryImageGenerator:
-    def __init__(self, ui):
+    def __init__(self, window):
+        self.window = window
         self.context_analyzer = ContextAnalyzer()
         self.character_initializer = CharacterInitializer()
         self.poem_analyzer = PoemAnalyzer()
         self.prompt_generator = PromptGenerator()
         self.image_generator = ImageGenerator()
-        self.ui = ui
 
-    def initialize_poem(self, poem_text: str) -> Poem:
-        self.ui.update_status("Initializing poem analysis...")
+    def initialize_poem(self, poem_text: str, output_folder: str) -> Poem:
+        update_output(self.window, "Initializing poem analysis...")
         start_time = time.time()
-        poem = self.poem_analyzer.analyze_poem(poem_text)
-        self.ui.update_status("Identifying characters in the poem...")
-        characters_info = self.poem_analyzer.identify_characters(poem_text)
+        poem = self.poem_analyzer.analyze_poem(poem_text, self.window)
+        context = self.context_analyzer.analyze_context(poem_text, self.window)
+        poem.theme = context['theme']
+        poem.context = context['context']
+        poem.time_period = context['time_period']
+        poem.location = context['location']
+        poem.style = context['style']
+        
+        update_output(self.window, "Identifying characters in the poem...")
+        characters_info = self.poem_analyzer.identify_characters(poem_text, self.window)
         for char_info in characters_info:
-            self.ui.update_status(f"Initializing character: {char_info['name']}")
-            character = self.character_initializer.initialize_character(char_info['name'], char_info['description'])
+            update_output(self.window, f"Initializing character: {char_info['name']}")
+            character = self.character_initializer.initialize_character(char_info['name'], char_info['brief_description'], poem.context, self.window)
+            if character.reference_image:
+                safe_name = ''.join(c for c in char_info['name'] if c.isalnum() or c in (' ', '_')).rstrip()
+                char_image_path = os.path.join(output_folder, f"character_{safe_name}.png")
+                character.reference_image.save(char_image_path)
+                update_output(self.window, f"Character image saved: {char_image_path}")
             poem.characters[character.name] = character
+        
         end_time = time.time()
-        self.ui.update_status(f"Poem initialization completed in {end_time - start_time:.2f} seconds.")
+        update_output(self.window, f"Poem initialization completed in {end_time - start_time:.2f} seconds.")
         return poem
 
     def process_poem(self, poem_text: str, output_folder: str):
-        try:
-            poem = self.poem_analyzer.analyze_poem(poem_text)
-            self.ui.update_status(f"Poem analysis complete. Identified {len(poem.stanzas)} stanzas.")
+        os.makedirs(output_folder, exist_ok=True)
+        poem = self.initialize_poem(poem_text, output_folder)
+        context = self.context_analyzer.analyze_context(poem_text, self.window)
+        poem.context = context['cultural_context']
+        poem.time_period = context['time_period']
 
-            for i, stanza in enumerate(poem.stanzas):
-                if self.ui.stop_event.is_set():
-                    self.ui.update_status("Processing stopped by user.")
+        for i, stanza in enumerate(poem.stanzas):
+            update_output(self.window, f"Processing stanza {i+1}/{len(poem.stanzas)}...")
+            self.window['-PROGRESS-'].update(current_count=int((i+1)/len(poem.stanzas)*100))
+
+            version = 1
+            while True:
+                prompt = self.prompt_generator.generate_prompt(stanza, poem, poem.characters, self.window)
+                update_output(self.window, f"Generated prompt: {prompt}")
+
+                image_path = self.image_generator.generate_image(prompt, stanza, os.path.join(output_folder, f"stanza_{i+1:02d}"), self.window, version)
+                
+                if image_path:
+                    update_output(self.window, f"Image generated: {image_path}")
+                    self.window['-IMAGE-'].update(filename=image_path)
+                    
+                    event, values = self.window.read()
+                    if event == 'Accept':
+                        update_output(self.window, "Image accepted.")
+                        break
+                    elif event == 'Regenerate':
+                        update_output(self.window, "Regenerating image...")
+                        version += 1
+                    elif event == 'Exit' or event == sg.WINDOW_CLOSED:
+                        update_output(self.window, "Exiting...")
+                        return
+                    
+                    feedback = values['-FEEDBACK-']
+                    if feedback:
+                        self.prompt_generator.add_feedback(feedback)
+                        update_output(self.window, f"Feedback added: {feedback}")
+                else:
+                    update_output(self.window, "Failed to generate image. Moving to next stanza.")
                     break
 
-                self.ui.update_status(f"\nProcessing stanza {i+1}/{len(poem.stanzas)}...")
-                self.ui.update_status(f"Stanza content:\n{stanza}")
+        update_output(self.window, "Poem processing complete.")
 
-                version = 1
-                while True:
-                    if self.ui.stop_event.is_set():
-                        break
+def create_window():
+    sg.theme('LightBlue2')
 
-                    try:
-                        self.ui.update_status("Generating prompt...")
-                        detailed_prompt = self.prompt_generator.generate_prompt(stanza, poem, poem.characters)
-                        self.ui.update_status(f"Generated prompt:\n{detailed_prompt}")
+    left_column = [
+        [sg.Text("Poetry Image Generator", font=("Helvetica", 20))],
+        [sg.Text("Enter your poem here:")],
+        [sg.Multiline(size=(60, 10), key="-POEM-")],
+        [sg.Text("Output Folder:"), sg.Input(key="-FOLDER-"), sg.FolderBrowse()],
+        [sg.Button("Generate Images"), sg.Button("Exit")],
+        [sg.Text("Status Messages:")],
+        [sg.Multiline(size=(60, 10), key="-OUTPUT-", disabled=True, autoscroll=True)],
+        [sg.ProgressBar(100, orientation='h', size=(20, 20), key='-PROGRESS-')]
+    ]
 
-                        self.ui.update_status("Generating image...")
-                        image_path = self.image_generator.generate_image(detailed_prompt, stanza, os.path.join(output_folder, f"stanza_{i+1:02d}"), version)
-                        if image_path is None:
-                            raise Exception("Image generation failed")
+    right_column = [
+        [sg.Image(key='-IMAGE-', size=(400, 400))],
+        [sg.Text("Feedback:"), sg.Input(key='-FEEDBACK-', size=(30, 1))],
+        [sg.Button("Accept"), sg.Button("Regenerate")]
+    ]
 
-                        self.ui.update_status(f"Image generated: {image_path}")
+    layout = [
+        [sg.Column(left_column), sg.VSeperator(), sg.Column(right_column, vertical_alignment='top')]
+    ]
 
-                        result, feedback = self.ui.wait_for_feedback(image_path)
+    return sg.Window("Poetry Image Generator", layout, finalize=True, resizable=True)
 
-                        if result == "accept":
-                            self.ui.update_status(f"Image approved. Feedback: {feedback}")
-                            self.prompt_generator.add_feedback(feedback)
-                            break
-                        elif result == "regenerate":
-                            self.ui.update_status(f"Regenerating image. Feedback: {feedback}")
-                            self.prompt_generator.add_feedback(feedback)
-                            version += 1
-                        elif result == "exit":
-                            self.ui.update_status("Exiting the program.")
-                            return
-                    except Exception as e:
-                        self.ui.update_status(f"Error processing stanza {i+1}: {str(e)}")
-                        if not messagebox.askyesno("Error", f"An error occurred: {str(e)}. Do you want to continue with the next stanza?"):
-                            return
+def update_output(window, message):
+    window['-OUTPUT-'].print(message)
+    window.refresh()
 
-            self.ui.update_status("\nProcessing complete.")
-        except Exception as e:
-            self.ui.update_status(f"An unexpected error occurred: {str(e)}")
+def main():
+    window = create_window()
 
+    while True:
+        event, values = window.read()
+        if event == sg.WINDOW_CLOSED or event == "Exit":
+            break
+        elif event == "Generate Images":
+            poem_text = values["-POEM-"]
+            output_folder = values["-FOLDER-"]
+            if poem_text and output_folder:
+                window['-OUTPUT-'].update("")  # Clear previous messages
+                window['-PROGRESS-'].update(current_count=0)
+                generator = PoetryImageGenerator(window)
+                threading.Thread(target=generator.process_poem, args=(poem_text, output_folder), daemon=True).start()
+            else:
+                sg.popup_error("Please enter a poem and select an output folder.")
+
+    window.close()
 
 if __name__ == "__main__":
-    # Check if API keys are available
-    if not os.getenv("OPENAI_API_KEY") or not os.getenv("ANTHROPIC_API_KEY"):
-        messagebox.showerror("Error", "API keys not found. Please check your .env file.")
-        exit(1)
-
-    root = tk.Tk()
-    app = ImprovedUserInterface(root)
-    root.mainloop()
+    main()                
